@@ -32,6 +32,7 @@
   --seabed-line:#B9AD8E;
   --mark:#C10070;
   --mark-soft:rgba(193,0,112,.12);
+  --amber:#A87900;
   --night-band:rgba(14,32,41,.055);
   --shadow:0 1px 0 rgba(14,32,41,.05);
 }
@@ -50,6 +51,7 @@
   --seabed-line:#2C3F49;
   --mark:#FF4FAC;
   --mark-soft:rgba(255,79,172,.16);
+  --amber:#E0B54A;
   --night-band:rgba(255,255,255,.035);
   --shadow:none;
 }
@@ -199,6 +201,30 @@ section{padding:22px 0;border-bottom:1px solid var(--rule-soft)}
 .ev.lw .m{background:var(--drying);color:var(--ink)}
 :root[data-theme="night"] .ev.hw .m{color:#04121A}
 :root[data-theme="night"] .ev.lw .m{color:#CFE2C2}
+
+/* ---------- sewage watch ---------- */
+.sewmap{position:relative;overflow:hidden;background:var(--shoal);border-top:1px solid var(--rule-soft)}
+.sewmap img{position:absolute;width:256px;height:256px;max-width:none;filter:saturate(.4) contrast(.95)}
+:root[data-theme="night"] .sewmap img{filter:invert(1) hue-rotate(180deg) saturate(.3) brightness(.85) contrast(.92)}
+.sewmap svg{display:block;position:absolute;inset:0}
+.osm{position:absolute;right:0;bottom:0;font-size:9px;color:var(--ink-2);background:var(--panel);opacity:.85;padding:1px 6px;border-radius:2px 0 0 0}
+.sewlist{padding:4px 16px 6px;border-top:1px solid var(--rule-soft)}
+.srow{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 10px;padding:8px 0;border-top:1px solid var(--rule-soft);font-size:13px}
+.srow:first-child{border-top:0}
+.srow .who{flex:1 1 auto;min-width:150px}
+.srow .who b{font-weight:600}
+.srow .who .meta{display:block;font-size:11px;color:var(--ink-3)}
+.srow .dist{white-space:nowrap;color:var(--ink-2);font-size:12px}
+.srow .note{white-space:nowrap;color:var(--ink-2);font-size:12px}
+.sw{flex:0 0 auto;font-size:9.5px;letter-spacing:.12em;font-weight:700;font-family:ui-monospace,Menlo,monospace;padding:1px 5px;border-radius:2px;align-self:center}
+.sw.active{background:var(--mark);color:#fff}
+.sw.recent{background:var(--amber);color:#fff}
+:root[data-theme="night"] .sw.recent{color:#06131A}
+.sw.idle{background:var(--drying);color:var(--ink)}
+:root[data-theme="night"] .sw.idle{color:#CFE2C2}
+.sw.offline{background:none;border:1px dashed var(--rule);color:var(--ink-3)}
+.sewmore{padding:9px 0 4px;font-size:11.5px;color:var(--ink-3)}
+.legend i.dotl{width:8px;height:8px;border-radius:50%}
 
 /* ---------- notices / footer ---------- */
 .notice{border:1px solid var(--rule);border-left:2px solid var(--mark);background:var(--panel);padding:12px 14px;border-radius:2px;font-size:13px;color:var(--ink-2);margin:16px 0}
@@ -384,13 +410,32 @@ const QUICK = [
   { name:"Scarborough", region:"North Yorkshire", lat:54.2810, lon:-0.3960 }
 ];
 
+/* Near-real-time storm overflow (sewage) activity, published by each English
+   water company to the Stream open data platform / National Storm Overflow Hub.
+   Public ArcGIS feature services: no key, no auth, CORS open, 10-minute refresh.
+   All follow the Stream data standard (two stragglers are normalised below). */
+const SEWAGE_SOURCES = [
+  "https://services-eu1.arcgis.com/6qJmARkS2dt2IjVA/arcgis/rest/services/SouthernWater_StormOverflowActivity_PROD_view/FeatureServer/0",
+  "https://services.arcgis.com/3SZ6e0uCvPROr4mS/arcgis/rest/services/Wessex_Water_Storm_Overflow_Activity/FeatureServer/0",
+  "https://services-eu1.arcgis.com/OMdMOtfhATJPcHe3/arcgis/rest/services/NEH_outlets_PROD/FeatureServer/0",
+  "https://services2.arcgis.com/g6o32ZDQ33GpCIu3/arcgis/rest/services/Thames_Water_Storm_Overflow_Activity_(Production)_view/FeatureServer/0",
+  "https://services3.arcgis.com/VCOY1atHWVcDlvlJ/arcgis/rest/services/stream_service_outfall_locations_view/FeatureServer/0",
+  "https://services-eu1.arcgis.com/1WqkK5cDKUbF0CkH/arcgis/rest/services/Yorkshire_Water_Storm_Overflow_Activity/FeatureServer/0",
+  "https://services-eu1.arcgis.com/MSNNjkZ51iVh8yBj/arcgis/rest/services/Northumbrian_Water_Storm_Overflow_Activity_2_view/FeatureServer/0",
+  "https://services5.arcgis.com/5eoLvR0f8HKb7HWP/arcgis/rest/services/United_Utilities_Storm_Overflow_Activity/FeatureServer/0",
+  "https://services1.arcgis.com/NO7lTIlnxRMMG9Gw/arcgis/rest/services/Severn_Trent_Water_Storm_Overflow_Activity/FeatureServer/0",
+  "https://services-eu1.arcgis.com/zat3uNEZelYVksuM/arcgis/rest/services/STREAM_Data/FeatureServer/0"
+];
+const SEW_RADII = [5, 10, 25];
+const SEW_RECENT_MS = 48 * 3600000;
+
 const REFRESH_MS = 10 * 60 * 1000;
 const FETCH_TIMEOUT = 14000;
 
 /* ==================================================================
    State
    ================================================================== */
-let state = { places: SEED.slice(), activeId: "seaview", theme: "chart", window: 48 };
+let state = { places: SEED.slice(), activeId: "seaview", theme: "chart", window: 48, sewKm: 10 };
 let data  = {};   // id -> { weather, marine, fetchedAt, error }
 let ticker = null, resizeTimer = null, searchTimer = null;
 
@@ -424,6 +469,18 @@ function nearestIdx(times, off){
   return best;
 }
 const compass = d => ["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"][Math.round(((d%360)+360)%360/22.5)%16];
+const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const fmtDM = (ep, off) => { const d = new Date(ep + off*1000); return d.getUTCDate() + " " + MONTHS[d.getUTCMonth()]; };
+const titleCase = s => s ? String(s).toLowerCase().replace(/(^|[\s(/-])[a-z]/g, m => m.toUpperCase()) : "";
+
+function distBrg(lat1, lon1, lat2, lon2){
+  const toR = Math.PI/180;
+  const dLat = (lat2-lat1)*toR, dLon = (lon2-lon1)*toR;
+  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*toR)*Math.cos(lat2*toR)*Math.sin(dLon/2)**2;
+  const y = Math.sin(dLon)*Math.cos(lat2*toR);
+  const x = Math.cos(lat1*toR)*Math.sin(lat2*toR) - Math.sin(lat1*toR)*Math.cos(lat2*toR)*Math.cos(dLon);
+  return { d: 2*6371*Math.asin(Math.sqrt(a)), b: (Math.atan2(y,x)*180/Math.PI+360)%360 };
+}
 
 function beaufort(kn){
   const t=[1,4,7,11,17,22,28,34,41,48,56,64];
@@ -544,6 +601,88 @@ async function loadAll(){
   setUpdating(false);
   await Store.set(K_CACHE, data);
   render();
+}
+
+/* ==================================================================
+   Sewage watch — storm overflow activity within a radius of the place.
+   ================================================================== */
+function sewUrl(base, p, km){
+  return base + "/query?f=json&where=1%3D1&geometry=" + p.lon + "," + p.lat +
+    "&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects" +
+    "&distance=" + (km*1000) + "&units=esriSRUnit_Meter" +
+    "&outFields=*&returnGeometry=true&outSR=4326&resultRecordCount=250";
+}
+
+// Field names vary in case across companies (South West camelCases them, and
+// ST Connect says LatestEventFinish) — fold everything to one shape.
+function normSew(f, p){
+  if (!f || !f.attributes) return null;
+  const a = {};
+  for (const k in f.attributes) a[k.toLowerCase()] = f.attributes[k];
+  const lat = f.geometry && typeof f.geometry.y === "number" ? f.geometry.y : a.latitude;
+  const lon = f.geometry && typeof f.geometry.x === "number" ? f.geometry.x : a.longitude;
+  if (!isFinite(lat) || !isFinite(lon)) return null;
+  const st = Number(a.status);
+  const { d, b } = distBrg(p.lat, p.lon, lat, lon);
+  return {
+    id: a.id != null ? String(a.id) : "",
+    company: a.company ? String(a.company) : "",
+    status: isFinite(st) ? st : 0,           // 1 discharging · 0 not · -1 monitor offline
+    start: a.latesteventstart || null,
+    end: a.latesteventend || a.latesteventfinish || null,
+    statusStart: a.statusstart || null,
+    water: a.receivingwatercourse ? String(a.receivingwatercourse) : "",
+    lat, lon, dist: d, brg: b
+  };
+}
+
+function sewState(it, now){
+  if (it.status === 1) return "active";
+  if (it.status === -1) return "offline";
+  const end = it.end || it.statusStart;
+  if (end && now - end < SEW_RECENT_MS) return "recent";
+  return "idle";
+}
+
+async function loadSewage(p, km){
+  const results = await Promise.allSettled(SEWAGE_SOURCES.map(u => jget(sewUrl(u, p, km))));
+  const items = [], seen = new Set();
+  let failed = 0, firstErr = null;
+  for (const r of results){
+    if (r.status !== "fulfilled"){
+      failed++;
+      if (!firstErr) firstErr = String(r.reason && r.reason.message || r.reason);
+      continue;
+    }
+    for (const f of (r.value && r.value.features) || []){
+      const it = normSew(f, p);
+      if (!it || it.dist > km * 1.2) continue;
+      const key = it.company + "|" + (it.id || it.lat.toFixed(5) + "," + it.lon.toFixed(5));
+      if (seen.has(key)) continue;
+      seen.add(key);
+      items.push(it);
+    }
+  }
+  if (failed === SEWAGE_SOURCES.length){
+    return { items: null, error: firstErr || "All feeds unreachable", fetchedAt: Date.now(), radius: km };
+  }
+  items.sort((a,b) => a.dist - b.dist);
+  return { items, failed, fetchedAt: Date.now(), radius: km };
+}
+
+const sewLoading = new Set();
+function ensureSewage(p){
+  if (!p || !data[p.id] || sewLoading.has(p.id)) return;
+  const s = data[p.id].sewage;
+  if (s && s.radius === state.sewKm && Date.now() - (s.fetchedAt || 0) < REFRESH_MS) return;
+  sewLoading.add(p.id);
+  loadSewage(p, state.sewKm).then(rec => {
+    sewLoading.delete(p.id);
+    if (!data[p.id]) return;
+    data[p.id].sewage = rec;
+    Store.set(K_CACHE, data);
+    if (state.activeId === p.id) render();
+  }).catch(() => sewLoading.delete(p.id));
 }
 
 /* ==================================================================
@@ -714,6 +853,160 @@ function drawTide(el, tide, place, nights, hours){
 }
 
 /* ==================================================================
+   Sewage map — a small fixed chartlet stitched from OpenStreetMap
+   tiles (no keys, no libraries), outfalls plotted over the top.
+   ================================================================== */
+function drawSewMap(el, place, items, km){
+  const W = Math.max(el.clientWidth || 640, 280);
+  const H = W < 560 ? 230 : 300;
+  const R = km * 1000;
+  const mpp0 = 156543.03392 * Math.cos(place.lat * Math.PI/180); // metres/px at zoom 0
+  const z = clamp(Math.floor(Math.log2(mpp0 * Math.min(W, H) / (2.4 * R))), 6, 15);
+  const scale = 256 * Math.pow(2, z), n = Math.pow(2, z);
+  const wx = lon => (lon + 180) / 360 * scale;
+  const wy = lat => {
+    const s = Math.sin(clamp(lat, -85, 85) * Math.PI/180);
+    return (0.5 - Math.log((1+s)/(1-s)) / (4*Math.PI)) * scale;
+  };
+  const cx = wx(place.lon), cy = wy(place.lat);
+  const px = lon => wx(lon) - cx + W/2, py = lat => wy(lat) - cy + H/2;
+
+  let tiles = "";
+  const tx0 = Math.floor((cx - W/2)/256), tx1 = Math.floor((cx + W/2)/256);
+  const ty0 = Math.max(0, Math.floor((cy - H/2)/256)), ty1 = Math.min(n-1, Math.floor((cy + H/2)/256));
+  for (let tx = tx0; tx <= tx1; tx++){
+    for (let ty = ty0; ty <= ty1; ty++){
+      const wrapped = ((tx % n) + n) % n;
+      // OSM first; if its volunteer servers decline, fall back to Esri's ocean
+      // basemap (also keyless), and failing both just leave the shoal blue.
+      const esri = `https://services.arcgisonline.com/arcgis/rest/services/Ocean/World_Ocean_Base/MapServer/tile/${z}/${ty}/${wrapped}`;
+      tiles += `<img src="https://tile.openstreetmap.org/${z}/${wrapped}/${ty}.png" alt="" loading="lazy" decoding="async"
+        style="left:${(tx*256 - cx + W/2).toFixed(1)}px;top:${(ty*256 - cy + H/2).toFixed(1)}px"
+        onerror="if(!this.dataset.f){this.dataset.f=1;this.src='${esri}'}else{this.remove()}">`;
+    }
+  }
+
+  // Idle first so anything discharging paints on top.
+  const now = Date.now();
+  const order = { idle:0, offline:1, recent:2, active:3 };
+  const sorted = items.map(it => ({ it, st: sewState(it, now) })).sort((a,b) => order[a.st] - order[b.st]);
+  let marks = "";
+  for (const { it, st } of sorted){
+    const X = px(it.lon).toFixed(1), Y = py(it.lat).toFixed(1);
+    const what = st === "active" ? "discharging now" : st === "recent" ? "discharged in last 48 h"
+               : st === "offline" ? "monitor offline" : "not discharging";
+    const tip = `<title>${esc((titleCase(it.water) || it.id) + " · " + it.company + " — " + what)}</title>`;
+    if (st === "active"){
+      marks += `<g><circle class="pulse" cx="${X}" cy="${Y}" r="10" fill="var(--mark)" opacity=".25"/>
+        <circle cx="${X}" cy="${Y}" r="4.4" fill="var(--mark)" stroke="#fff" stroke-width="1.4"/>${tip}</g>`;
+    } else if (st === "recent"){
+      marks += `<g><circle cx="${X}" cy="${Y}" r="4" fill="var(--amber)" stroke="#fff" stroke-width="1.2"/>${tip}</g>`;
+    } else if (st === "offline"){
+      marks += `<g><circle cx="${X}" cy="${Y}" r="3.2" fill="none" stroke="var(--ink-3)" stroke-width="1.3" stroke-dasharray="2 2"/>${tip}</g>`;
+    } else {
+      marks += `<g><circle cx="${X}" cy="${Y}" r="3.2" fill="var(--panel)" stroke="var(--shoal-deep)" stroke-width="1.6"/>${tip}</g>`;
+    }
+  }
+
+  const ring = (R / (mpp0 / Math.pow(2, z))).toFixed(1);
+  el.style.height = H + "px";
+  el.innerHTML = tiles + `
+    <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="Storm overflows within ${km} km">
+      <circle cx="${W/2}" cy="${H/2}" r="${ring}" fill="none" stroke="var(--mark)" stroke-width="1" stroke-dasharray="3 5" opacity=".55"/>
+      <g stroke="#fff" stroke-width="3.6" stroke-linecap="round" opacity=".85"><line x1="${W/2-7}" y1="${H/2}" x2="${W/2+7}" y2="${H/2}"/><line x1="${W/2}" y1="${H/2-7}" x2="${W/2}" y2="${H/2+7}"/></g>
+      <g stroke="var(--ink)" stroke-width="1.5" stroke-linecap="round"><line x1="${W/2-7}" y1="${H/2}" x2="${W/2+7}" y2="${H/2}"/><line x1="${W/2}" y1="${H/2-7}" x2="${W/2}" y2="${H/2+7}"/></g>
+      ${marks}
+    </svg>
+    <span class="osm">© OpenStreetMap · Esri</span>`;
+}
+
+function sewRow(it, st, off, now){
+  let note;
+  if (st === "active"){
+    const s = it.start || it.statusStart;
+    note = s ? "since " + fmtT(s, off) + " · " + dur(now - s) : "discharging";
+  } else if (st === "recent"){
+    note = it.end ? "stopped " + dur(now - it.end) + " ago" : "in last 48 h";
+  } else if (st === "offline"){
+    note = "no signal";
+  } else {
+    const e = it.end || it.statusStart;
+    note = e ? "quiet since " + fmtDM(e, off) : "no spill on record";
+  }
+  const chip = { active:"DISCH", recent:"48 H", idle:"OK", offline:"OFF" }[st];
+  return `<div class="srow">
+    <span class="sw ${st}">${chip}</span>
+    <span class="who"><b class="sea">${esc(titleCase(it.water) || it.id)}</b>
+      <span class="meta">${esc(it.company)}${it.id && it.water ? " · " + esc(it.id) : ""}</span></span>
+    <span class="dist mono">${it.dist.toFixed(1)} km ${compass(it.brg)}</span>
+    <span class="note">${esc(note)}</span>
+  </div>`;
+}
+
+function sewageSection(p, d, off){
+  const s = d.sewage;
+  const seg = `<span class="seg">` + SEW_RADII.map(k =>
+    `<button data-sewkm="${k}" aria-pressed="${state.sewKm===k}">${k} km</button>`).join("") + `</span>`;
+  const head = `<div class="shead"><span class="eyebrow">Sewage · storm overflows</span>${seg}</div>`;
+
+  if (!s || (!s.items && !s.error)){
+    return `<section>${head}<div class="skel" style="height:180px"></div></section>`;
+  }
+  if (!s.items){
+    return `<section>${head}<div class="notice" style="margin:0">
+      <b>Couldn't reach the storm overflow feeds.</b><br>
+      ${isBlocked(s.error) ? "This preview has no route out to the water companies' servers — open the page outside the preview and it will load." : esc(s.error || "")}
+      <br><button class="hbtn" onclick="window.__retrySew()" style="margin-top:10px">Try again</button></div></section>`;
+  }
+
+  const now = Date.now();
+  const withSt = s.items.map(it => ({ it, st: sewState(it, now) }));
+  const act  = withSt.filter(x => x.st === "active");
+  const rec  = withSt.filter(x => x.st === "recent");
+  const idle = withSt.filter(x => x.st === "idle");
+  const offl = withSt.filter(x => x.st === "offline");
+
+  let big, desc, col = "var(--ink)";
+  if (act.length){ big = act.length; desc = (act.length === 1 ? "outfall is" : "outfalls are") + " discharging into the sea near here right now"; col = "var(--mark)"; }
+  else if (rec.length){ big = rec.length; desc = (rec.length === 1 ? "outfall" : "outfalls") + " discharged within the last 48 hours"; col = "var(--amber)"; }
+  else if (withSt.length){ big = withSt.length; desc = "monitored outfalls — none discharging in the last 48 hours"; }
+
+  const drop = `<svg class="wx" viewBox="0 0 26 29" aria-hidden="true" style="color:${col}">
+    <path d="M13 3.5c3.4 4.8 5.6 7.7 5.6 10.6a5.6 5.6 0 1 1-11.2 0C7.4 11.2 9.6 8.3 13 3.5Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+    <path d="M4 25.5c2.3 0 2.3-2.4 4.5-2.4s2.3 2.4 4.5 2.4 2.3-2.4 4.5-2.4 2.3 2.4 4.5 2.4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" opacity=".55"/></svg>`;
+
+  let body;
+  if (!withSt.length){
+    body = `<div class="pane"><span class="eyebrow">Within ${s.radius} km</span>
+      <div class="desc" style="font-size:13px;color:var(--ink-2);margin-top:8px;line-height:1.5">
+        No monitored storm overflows within ${s.radius} km of this point. Coverage is the English water
+        companies' event-duration monitors — try a wider radius, or a point nearer the English coast.</div></div>`;
+  } else {
+    // Everything active or recent always shows; quiet outfalls fill up to twelve rows.
+    const shown = [...act, ...rec, ...idle, ...offl].slice(0, Math.max(12, act.length + rec.length));
+    const rest = withSt.length - shown.length;
+    body = `<div class="pane" style="padding-bottom:13px">
+      <div class="headline" style="margin-bottom:0">${drop}
+        <div><div class="num" style="color:${col}">${big}</div><div class="desc">${desc}</div></div>
+      </div></div>
+      <div class="sewmap" id="sewmap"></div>
+      <div class="sewlist">${shown.map(x => sewRow(x.it, x.st, off, now)).join("")}
+      ${rest > 0 ? `<div class="sewmore">…and ${rest} more monitored outfall${rest>1?"s":""} within ${s.radius} km, none discharging.</div>` : ""}</div>`;
+  }
+
+  const legend = `<div class="legend">
+    <span><i class="dotl" style="background:var(--mark)"></i>Discharging</span>
+    <span><i class="dotl" style="background:var(--amber)"></i>Last 48 h</span>
+    <span><i class="dotl" style="background:var(--panel);border:1.5px solid var(--shoal-deep)"></i>Quiet</span>
+    <span><i class="dotl" style="border:1px dashed var(--ink-3)"></i>Monitor offline</span>
+    ${s.failed ? `<span>${s.failed} of ${SEWAGE_SOURCES.length} feeds unreachable</span>` : ""}
+    <span style="margin-left:auto">checked ${fmtT(s.fetchedAt, off)}</span>
+  </div>`;
+
+  return `<section>${head}<div class="tidebox">${body}${legend}</div></section>`;
+}
+
+/* ==================================================================
    Render
    ================================================================== */
 function activePlace(){ return state.places.find(p => p.id === state.activeId) || state.places[0]; }
@@ -823,6 +1116,7 @@ function render(){
     heroHtml(p, tide, off, tzab, D) +
     tideSection(tide) +
     conditionsSection(w, m, off) +
+    sewageSection(p, d, off) +
     daysSection(w, m, tide, off) +
     tableSection(tide, off, D) +
     (d.error === "partial" ? `<div class="notice"><b>Part of the forecast is missing.</b> Showing what came back. <button class="hbtn" onclick="window.__retry()">Try again</button></div>` : "") +
@@ -835,6 +1129,14 @@ function render(){
       state.window = Number(b.dataset.win); saveState(); render();
     });
   }
+  const smap = $("#sewmap");
+  if (smap && d.sewage && d.sewage.items) drawSewMap(smap, p, d.sewage.items, d.sewage.radius || state.sewKm);
+  document.querySelectorAll("[data-sewkm]").forEach(b => b.onclick = () => {
+    state.sewKm = Number(b.dataset.sewkm); saveState();
+    if (data[p.id]) delete data[p.id].sewage;
+    render();
+  });
+  ensureSewage(p);
   refreshStamp();
   startTicker();
 }
@@ -1037,7 +1339,9 @@ function tableSection(tide, off, D){
 
 function footerHtml(m, tide){
   return `<footer>
-    Weather from national meteorological services via Open-Meteo. Waves, sea temperature, currents and sea level from Copernicus Marine (MeteoFrance SMOC and MFWAM) via Open-Meteo.<br>
+    Weather from national meteorological services via Open-Meteo. Waves, sea temperature, currents and sea level from Copernicus Marine (MeteoFrance SMOC and MFWAM) via Open-Meteo.
+    Storm overflow status straight from the water companies' event-duration monitors via the Stream open data platform (the National Storm Overflow Hub, England only; refreshed every ten minutes,
+    and a monitor saying nothing is not the same as nothing happening). Map tiles © OpenStreetMap contributors.<br>
     Sea level is modelled on an 8 km grid and referenced to mean sea level, not chart datum. In a place as awkward as the Solent it will read a few minutes and a few tenths out.
     <b style="color:var(--ink-2)">Not for navigation — keep the almanac.</b>
   </footer>`;
@@ -1190,6 +1494,11 @@ function applyTheme(){
 }
 
 window.__retry = () => loadAll();
+window.__retrySew = () => {
+  const d = data[state.activeId];
+  if (d) delete d.sewage;
+  render();
+};
 
 async function boot(){
   const saved = await Store.get(K_STATE);
@@ -1222,6 +1531,8 @@ window.addEventListener("resize", () => {
       const tide = buildTide(d.marine);
       if (tide) drawTide(box, tide, p, nightBands(d.weather), state.window);
     }
+    const smap = $("#sewmap");
+    if (smap && d && d.sewage && d.sewage.items) drawSewMap(smap, p, d.sewage.items, d.sewage.radius || state.sewKm);
   }, 180);
 });
 
