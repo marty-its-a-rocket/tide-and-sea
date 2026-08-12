@@ -136,9 +136,22 @@ header{
 .hgt .v{font-size:26px;line-height:1}
 .hgt .v small{font-size:13px;color:var(--ink-2);font-style:normal;font-family:inherit}
 
+/* ---------- section nav ---------- */
+.secnav{display:flex;gap:0;overflow-x:auto;scrollbar-width:none;border-top:1px solid var(--rule-soft)}
+.secnav::-webkit-scrollbar{display:none}
+.secnav:empty{display:none}
+.secnav a{
+  padding:7px 12px 6px;font-size:10px;letter-spacing:.12em;text-transform:uppercase;font-weight:650;
+  color:var(--ink-3);text-decoration:none;white-space:nowrap;border-bottom:2px solid transparent;
+  font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+.secnav a:first-child{padding-left:0}
+.secnav a:hover{color:var(--ink)}
+.secnav a.on{color:var(--mark);border-bottom-color:var(--mark)}
+
 /* ---------- sections ---------- */
-section{padding:22px 0;border-bottom:1px solid var(--rule-soft)}
-.shead{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:14px}
+section{padding:22px 0;border-bottom:1px solid var(--rule-soft);scroll-margin-top:var(--headh,124px)}
+.shead{display:flex;align-items:baseline;justify-content:space-between;gap:8px 12px;margin-bottom:14px;flex-wrap:wrap}
 .seg{display:inline-flex;border:1px solid var(--rule);border-radius:2px;overflow:hidden}
 .seg button{
   appearance:none;background:var(--panel);border:0;border-left:1px solid var(--rule);
@@ -243,6 +256,23 @@ section{padding:22px 0;border-bottom:1px solid var(--rule-soft)}
 .sewmore{padding:9px 0 4px;font-size:11.5px;color:var(--ink-3)}
 .legend i.dotl{width:8px;height:8px;border-radius:50%}
 
+/* ---------- tidal stream / data-source notes ---------- */
+.tstrip{display:flex;flex-wrap:wrap;gap:6px 0;margin-top:13px;border-top:1px solid var(--rule-soft);padding-top:11px}
+.tstrip .eyebrow{flex-basis:100%;margin-bottom:5px}
+.tsc{flex:1 0 40px;display:flex;flex-direction:column;align-items:center;gap:3px}
+.tsc .th{font-size:9.5px;color:var(--ink-3)}
+.tsc .tv{font-size:12px}
+.tsc .arrow{margin:0}
+.srcnote{font-size:10.5px;color:var(--ink-3);margin-top:10px;line-height:1.5}
+
+/* ---------- synoptic chart ---------- */
+.synwrap{overflow-x:auto;background:#fff;scrollbar-width:thin}
+.synwrap a{display:block;width:max-content;margin:0 auto}
+.synwrap img{display:block;height:min(90vw,460px);width:auto;max-width:none}
+:root[data-theme="night"] .synwrap{background:#10171b}
+:root[data-theme="night"] .synwrap img{filter:brightness(.84)}
+.synerr{padding:28px 16px;font-size:13px;color:var(--ink-2)}
+
 /* ---------- notices / footer ---------- */
 .notice{border:1px solid var(--rule);border-left:2px solid var(--mark);background:var(--panel);padding:12px 14px;border-radius:2px;font-size:13px;color:var(--ink-2);margin:16px 0}
 .notice b{color:var(--ink);font-weight:600}
@@ -341,6 +371,7 @@ input:focus-visible,button:focus-visible,.place:focus-visible{outline:2px solid 
       </button>
     </div>
     <div class="places" id="places" role="tablist"></div>
+    <nav class="secnav" id="secnav" aria-label="Sections"></nav>
   </div>
 </header>
 
@@ -446,13 +477,29 @@ const SEWAGE_SOURCES = [
 const SEW_RADII = [5, 10, 25];
 const SEW_RECENT_MS = 48 * 3600000;
 
+/* NOAA Ocean Prediction Center surface charts — public domain, keyless,
+   redrawn several times a day. The analysis is the east-Atlantic sheet
+   (UK top right); the forecasts only exist as full-Atlantic sheets. */
+const SYN_CHARTS = [
+  { k:"now", label:"Now",   url:"https://ocean.weather.gov/shtml/A_east_00hrsfc.gif" },
+  { k:"24",  label:"+24h",  url:"https://ocean.weather.gov/shtml/A_24hrsfc.gif" },
+  { k:"48",  label:"+48h",  url:"https://ocean.weather.gov/shtml/A_48hrsfc.gif" },
+  { k:"72",  label:"+72h",  url:"https://ocean.weather.gov/shtml/A_72hrsfc.gif" },
+  { k:"96",  label:"+96h",  url:"https://ocean.weather.gov/shtml/A_96hrsfc.gif" }
+];
+
+/* The Met Office UKV model (2 km grid) resolves headlands and estuaries the
+   ~10 km blended model smears out. Only defined over the British Isles. */
+const UKV_BOX = { la0:49.3, la1:61.2, lo0:-8.8, lo1:2.4 };
+const inUKV = p => p.lat >= UKV_BOX.la0 && p.lat <= UKV_BOX.la1 && p.lon >= UKV_BOX.lo0 && p.lon <= UKV_BOX.lo1;
+
 const REFRESH_MS = 10 * 60 * 1000;
 const FETCH_TIMEOUT = 14000;
 
 /* ==================================================================
    State
    ================================================================== */
-let state = { places: SEED.slice(), activeId: "seaview", theme: "chart", window: 48, sewKm: 10 };
+let state = { places: SEED.slice(), activeId: "seaview", theme: "chart", window: 48, sewKm: 10, syn: "now" };
 let data  = {};   // id -> { weather, marine, fetchedAt, error }
 let ticker = null, resizeTimer = null, searchTimer = null;
 
@@ -582,9 +629,16 @@ async function jget(url){
 function weatherUrl(p){
   return "https://api.open-meteo.com/v1/forecast?latitude=" + p.lat + "&longitude=" + p.lon +
     "&current=temperature_2m,apparent_temperature,relative_humidity_2m,is_day,precipitation,weather_code,cloud_cover,pressure_msl,wind_speed_10m,wind_direction_10m,wind_gusts_10m" +
-    "&hourly=temperature_2m,precipitation_probability,weather_code,wind_speed_10m,wind_gusts_10m,wind_direction_10m,visibility,is_day" +
+    "&hourly=temperature_2m,precipitation_probability,weather_code,wind_speed_10m,wind_gusts_10m,wind_direction_10m,visibility,is_day,pressure_msl" +
     "&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset,precipitation_sum,precipitation_probability_max,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant" +
     "&wind_speed_unit=kn&timezone=auto&forecast_days=7&past_days=1";
+}
+function ukvUrl(p){
+  return "https://api.open-meteo.com/v1/forecast?latitude=" + p.lat + "&longitude=" + p.lon +
+    "&models=ukmo_uk_deterministic_2km" +
+    "&current=wind_speed_10m,wind_direction_10m,wind_gusts_10m" +
+    "&hourly=wind_speed_10m,wind_gusts_10m,wind_direction_10m" +
+    "&wind_speed_unit=kn&timezone=auto&forecast_days=2";
 }
 function marineUrl(p){
   return "https://marine-api.open-meteo.com/v1/marine?latitude=" + p.lat + "&longitude=" + p.lon +
@@ -595,11 +649,17 @@ function marineUrl(p){
 }
 
 async function loadPlace(p){
-  const [w, m] = await Promise.allSettled([ jget(weatherUrl(p)), jget(marineUrl(p)) ]);
+  const [w, m, u] = await Promise.allSettled([
+    jget(weatherUrl(p)),
+    jget(marineUrl(p)),
+    inUKV(p) ? jget(ukvUrl(p)) : Promise.resolve(null)
+  ]);
   const prev = data[p.id] || {};
   const rec = {
     weather: w.status === "fulfilled" ? w.value : (prev.weather || null),
     marine:  m.status === "fulfilled" ? m.value  : (prev.marine  || null),
+    // High-resolution wind is a bonus, never a blocker — keep the last good one.
+    ukv:     u.status === "fulfilled" && u.value ? u.value : (prev.ukv || null),
     fetchedAt: Date.now(),
     error: null
   };
@@ -711,8 +771,17 @@ function catmull(p0,p1,p2,p3,u){
   return 0.5*((2*p1) + (-p0+p2)*u + (2*p0-5*p1+4*p2-p3)*u2 + (-p0+3*p1-3*p2+p3)*u3);
 }
 
+// Building the minute-resolution curve is the priciest thing the page does,
+// and callers ask for it on every render — memoise per response object.
+const tideCache = new WeakMap();
 function buildTide(marine){
   if (!marine || !marine.hourly || !marine.hourly.sea_level_height_msl) return null;
+  if (tideCache.has(marine)) return tideCache.get(marine);
+  const tide = buildTideUncached(marine);
+  tideCache.set(marine, tide);
+  return tide;
+}
+function buildTideUncached(marine){
   const off = marine.utc_offset_seconds || 0;
   const times = marine.hourly.time, raw = marine.hourly.sea_level_height_msl;
 
@@ -765,11 +834,17 @@ function buildTide(marine){
 }
 
 function heightAt(tide, ep){
-  const { samples } = tide;
-  if (ep <= samples[0].t) return samples[0].h;
-  if (ep >= samples[samples.length-1].t) return samples[samples.length-1].h;
-  const i = clamp(Math.round((ep - samples[0].t) / 60000), 0, samples.length-1);
-  return samples[i].h;
+  // Binary search — the samples are ordered but not perfectly uniform when
+  // the source series has gaps, so indexing by minute offset can misread.
+  const s = tide.samples;
+  if (ep <= s[0].t) return s[0].h;
+  if (ep >= s[s.length-1].t) return s[s.length-1].h;
+  let lo = 0, hi = s.length - 1;
+  while (hi - lo > 1){
+    const mid = (lo + hi) >> 1;
+    if (s[mid].t <= ep) lo = mid; else hi = mid;
+  }
+  return s[lo].h;
 }
 
 /* ==================================================================
@@ -889,7 +964,7 @@ function sewMercator(z){
 
 // One live view: centre, zoom and selection survive refreshes and re-renders,
 // reset when the place or the search radius changes.
-const sewMap = { pid:null, km:0, lat:0, lon:0, z:0, sel:null, off:0, el:null, place:null, items:[], moved:false };
+const sewMap = { pid:null, km:0, lat:0, lon:0, z:0, sel:null, off:0, el:null, place:null, items:[] };
 
 function drawSewMap(el, place, items, km, off){
   if (sewMap.pid !== place.id || sewMap.km !== km){
@@ -1008,13 +1083,12 @@ function bindSewMap(el){
   if (el.dataset.bound) return;
   el.dataset.bound = "1";
 
+  // The zoom buttons and the card keep ordinary click behaviour; everything
+  // else on the map is driven from pointer events below.
   el.addEventListener("click", e => {
     const zb = e.target.closest("[data-sz]");
     if (zb){ sewZoomAt(Number(zb.dataset.sz)); return; }
-    if (e.target.closest("[data-sclose]")){ sewMap.sel = null; renderSewMap(); return; }
-    if (sewMap.moved) return;
-    const g = e.target.closest("g[data-sew]");
-    if (g){ sewMap.sel = g.dataset.sew === sewMap.sel ? null : g.dataset.sew; renderSewMap(); }
+    if (e.target.closest("[data-sclose]")){ sewMap.sel = null; renderSewMap(); }
   });
   el.addEventListener("keydown", e => {
     if (e.key !== "Enter" && e.key !== " ") return;
@@ -1022,32 +1096,42 @@ function bindSewMap(el){
     if (g){ e.preventDefault(); sewMap.sel = g.dataset.sew; renderSewMap(); }
   });
   el.addEventListener("wheel", e => {
+    if (e.target.closest(".scard")) return;
     e.preventDefault();
     sewZoomAt(e.deltaY < 0 ? 1 : -1, e.clientX, e.clientY);
   }, { passive: false });
-  el.addEventListener("dblclick", e => { e.preventDefault(); sewZoomAt(1, e.clientX, e.clientY); });
+  el.addEventListener("dblclick", e => {
+    if (e.target.closest(".szoom") || e.target.closest(".scard")) return;
+    e.preventDefault();
+    sewZoomAt(1, e.clientX, e.clientY);
+  });
 
-  // Pan and pinch. Pointer capture only begins once real movement is seen,
-  // so plain taps still reach the markers as ordinary clicks.
+  // Pan, pinch and tap. Pointers are captured immediately so a fast flick
+  // that leaves the element before its first move event still pans, and no
+  // stale pointer can wedge the gesture state; taps are resolved on
+  // pointerup from the pointerdown target instead of the retargeted click.
   const ptrs = new Map();
-  let anchor = null, captured = false, pinch0 = 0, pinchMid = null, scale = 1;
+  let anchor = null, downTarget = null, moved = false, pinch0 = 0, pinchMid = null, scale = 1;
   const wrap = () => el.querySelector(".smw");
   const pinchDist = () => {
     const [a, b] = [...ptrs.values()];
     return Math.hypot(a.x - b.x, a.y - b.y);
   };
-  const reset = () => { anchor = null; captured = false; pinch0 = 0; pinchMid = null; scale = 1; };
 
   el.addEventListener("pointerdown", e => {
     if (e.target.closest(".szoom") || e.target.closest(".scard")) return;
+    try { el.setPointerCapture(e.pointerId); } catch {}
     ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
-    if (ptrs.size === 1){ anchor = { x: e.clientX, y: e.clientY }; sewMap.moved = false; }
+    if (ptrs.size === 1){
+      anchor = { x: e.clientX, y: e.clientY };
+      downTarget = e.target;
+      moved = false;
+    }
     if (ptrs.size === 2){
       pinch0 = pinchDist();
       const [a, b] = [...ptrs.values()];
       pinchMid = { x: (a.x + b.x)/2, y: (a.y + b.y)/2 };
-      sewMap.moved = true;
-      for (const id of ptrs.keys()){ try { el.setPointerCapture(id); } catch {} }
+      moved = true;
     }
   });
   el.addEventListener("pointermove", e => {
@@ -1064,11 +1148,8 @@ function bindSewMap(el){
     }
     if (ptrs.size === 1 && anchor){
       const dx = e.clientX - anchor.x, dy = e.clientY - anchor.y;
-      if (!captured && Math.hypot(dx, dy) > 4){
-        captured = true; sewMap.moved = true;
-        try { el.setPointerCapture(e.pointerId); } catch {}
-      }
-      if (captured) w.style.transform = "translate(" + dx + "px," + dy + "px)";
+      if (!moved && Math.hypot(dx, dy) > 4) moved = true;
+      if (moved) w.style.transform = "translate(" + dx + "px," + dy + "px)";
     }
   });
   const finish = e => {
@@ -1083,18 +1164,24 @@ function bindSewMap(el){
         const [rem] = [...ptrs.values()];
         anchor = { x: rem.x, y: rem.y };
       }
-      pinch0 = 0; pinchMid = null; scale = 1; captured = false;
+      pinch0 = 0; pinchMid = null; scale = 1;
       return;
     }
     if (ptrs.size === 0){
-      if (captured && anchor){
+      if (moved && anchor && e.type === "pointerup"){
         const dx = last.x - anchor.x, dy = last.y - anchor.y;
         const M = sewMercator(sewMap.z);
         sewMap.lon = M.lon(M.x(sewMap.lon) - dx);
         sewMap.lat = M.lat(M.y(sewMap.lat) - dy);
         renderSewMap();
+      } else if (!moved && e.type === "pointerup" && downTarget){
+        const g = downTarget.closest && downTarget.closest("g[data-sew]");
+        if (g){ sewMap.sel = g.dataset.sew === sewMap.sel ? null : g.dataset.sew; renderSewMap(); }
+      } else {
+        const w = wrap();
+        if (w) w.style.transform = "";
       }
-      reset();
+      anchor = null; downTarget = null; moved = false; pinch0 = 0; pinchMid = null; scale = 1;
     }
   };
   el.addEventListener("pointerup", finish);
@@ -1128,12 +1215,13 @@ function sewageSection(p, d, off){
   const seg = `<span class="seg">` + SEW_RADII.map(k =>
     `<button data-sewkm="${k}" aria-pressed="${state.sewKm===k}">${k} km</button>`).join("") + `</span>`;
   const head = `<div class="shead"><span class="eyebrow">Sewage · storm overflows</span>${seg}</div>`;
+  const open = `<section id="sec-sew" data-nav="Sewage">`;
 
   if (!s || (!s.items && !s.error)){
-    return `<section>${head}<div class="skel" style="height:180px"></div></section>`;
+    return `${open}${head}<div class="skel" style="height:180px"></div></section>`;
   }
   if (!s.items){
-    return `<section>${head}<div class="notice" style="margin:0">
+    return `${open}${head}<div class="notice" style="margin:0">
       <b>Couldn't reach the storm overflow feeds.</b><br>
       ${isBlocked(s.error) ? "This preview has no route out to the water companies' servers — open the page outside the preview and it will load." : esc(s.error || "")}
       <br><button class="hbtn" onclick="window.__retrySew()" style="margin-top:10px">Try again</button></div></section>`;
@@ -1179,12 +1267,12 @@ function sewageSection(p, d, off){
     <span><i class="dotl" style="background:var(--amber)"></i>Last 48 h</span>
     <span><i class="dotl" style="background:var(--panel);border:1.5px solid var(--shoal-deep)"></i>Quiet</span>
     <span><i class="dotl" style="border:1px dashed var(--ink-3)"></i>Monitor offline</span>
-    <span>Tap an outfall · drag to pan · pinch or scroll to zoom</span>
+    ${withSt.length ? `<span>Tap an outfall · drag to pan · pinch or scroll to zoom</span>` : ""}
     ${s.failed ? `<span>${s.failed} of ${SEWAGE_SOURCES.length} feeds unreachable</span>` : ""}
     <span style="margin-left:auto">checked ${fmtT(s.fetchedAt, off)}</span>
   </div>`;
 
-  return `<section>${head}<div class="tidebox">${body}${legend}</div></section>`;
+  return `${open}${head}<div class="tidebox">${body}${legend}</div></section>`;
 }
 
 /* ==================================================================
@@ -1267,6 +1355,7 @@ function render(){
       <p>Nothing to watch yet. Add a stretch of coast and the tide, the wind and the sea state come with it.</p>
       <button class="hbtn" id="emptyAdd">Add a place</button></div>`;
     $("#emptyAdd").onclick = () => openSheet("add");
+    renderNav();
     return;
   }
 
@@ -1282,6 +1371,7 @@ function render(){
         <div class="skel" style="height:34px;width:220px;margin-bottom:18px"></div>
         <div class="skel" style="height:${window.innerWidth<560?200:260}px"></div></section>`;
     }
+    renderNav();
     refreshStamp();
     return;
   }
@@ -1296,9 +1386,10 @@ function render(){
   main.innerHTML =
     heroHtml(p, tide, off, tzab, D) +
     tideSection(tide) +
-    conditionsSection(w, m, off) +
+    conditionsSection(w, m, off, d.ukv) +
     sewageSection(p, d, off) +
     daysSection(w, m, tide, off) +
+    synSection() +
     tableSection(tide, off, D) +
     (d.error === "partial" ? `<div class="notice"><b>Part of the forecast is missing.</b> Showing what came back. <button class="hbtn" onclick="window.__retry()">Try again</button></div>` : "") +
     footerHtml(m, tide);
@@ -1328,10 +1419,52 @@ function render(){
     renderSewMap();
     el.scrollIntoView({ behavior: "smooth", block: "center" });
   });
+  document.querySelectorAll("[data-syn]").forEach(b => b.onclick = () => {
+    state.syn = b.dataset.syn; saveState(); render();
+  });
+  const syw = $("#synwrap"), syi = $("#synimg");
+  if (syw && syi){
+    // Wide forecast sheets: start scrolled to the eastern edge, where Britain is.
+    const east = () => { syw.scrollLeft = syw.scrollWidth; };
+    if (syi.complete) east(); else syi.onload = east;
+    syi.onerror = () => { syw.innerHTML = `<div class="synerr">Chart unavailable just now — NOAA may be redrawing it. It refreshes several times a day.</div>`; };
+  }
   ensureSewage(p);
+  renderNav();
   refreshStamp();
   startTicker();
 }
+
+/* ==================================================================
+   Section navigation — built from whatever sections rendered, with a
+   scroll-spy underline so you always know where you are.
+   ================================================================== */
+let navSecs = [];
+function renderNav(){
+  const nav = $("#secnav");
+  navSecs = [...document.querySelectorAll("#main section[data-nav]")];
+  nav.innerHTML = navSecs.map(s => `<a href="#${s.id}">${esc(s.dataset.nav)}</a>`).join("");
+  document.documentElement.style.setProperty("--headh", (document.querySelector("header").offsetHeight + 8) + "px");
+  nav.querySelectorAll("a").forEach(a => a.onclick = e => {
+    e.preventDefault();
+    const t = document.querySelector(a.getAttribute("href"));
+    if (t) t.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+  spyNav();
+}
+function spyNav(){
+  if (!navSecs.length) return;
+  const line = document.querySelector("header").offsetHeight + 40;
+  let cur = navSecs[0];
+  for (const s of navSecs) if (s.getBoundingClientRect().top <= line) cur = s;
+  document.querySelectorAll("#secnav a").forEach(a =>
+    a.classList.toggle("on", a.getAttribute("href") === "#" + cur.id));
+}
+let spyRaf = 0;
+window.addEventListener("scroll", () => {
+  if (spyRaf) return;
+  spyRaf = requestAnimationFrame(() => { spyRaf = 0; spyNav(); });
+}, { passive: true });
 
 function heroHtml(p, tide, off, tzab, D){
   let body = `<div class="state"><div class="big"><span class="lbl">No tide model here</span>
@@ -1372,7 +1505,7 @@ function heroHtml(p, tide, off, tzab, D){
 
 function tideSection(tide){
   if (!tide) return "";
-  return `<section>
+  return `<section id="sec-tide" data-nav="Tide">
     <div class="shead">
       <span class="eyebrow">Water over the ground</span>
       <span class="seg">
@@ -1396,15 +1529,36 @@ function num(v, dp, unit){
   return (v === null || v === undefined || !isFinite(v)) ? "—" : v.toFixed(dp) + (unit || "");
 }
 
-function conditionsSection(w, m, off){
+function conditionsSection(w, m, off, ukv){
   const c = (w && w.current) || {};
   const mc = (m && m.current) || {};
   const wi = wxInfo(c.weather_code, c.is_day !== 0);
-  const bf = beaufort(c.wind_speed_10m || 0);
+
+  // Prefer the Met Office UKV 2 km wind where it exists — around headlands
+  // and inside estuaries it is a different (and better) answer.
+  const uc = (ukv && ukv.current) || {};
+  const hires = uc.wind_speed_10m != null && uc.wind_direction_10m != null;
+  const ws = hires ? uc.wind_speed_10m : c.wind_speed_10m;
+  const wd = hires ? uc.wind_direction_10m : c.wind_direction_10m;
+  const wg = hires && uc.wind_gusts_10m != null ? uc.wind_gusts_10m : c.wind_gusts_10m;
+
+  const bf = beaufort(ws || 0);
   const waveH = mc.wave_height;
   const dg = (waveH !== undefined && waveH !== null) ? douglas(waveH) : null;
-  const mph = c.wind_speed_10m !== undefined ? (c.wind_speed_10m * 1.15078) : null;
+  const mph = ws !== undefined && ws !== null ? (ws * 1.15078) : null;
   const cur = mc.ocean_current_velocity !== undefined && mc.ocean_current_velocity !== null ? mc.ocean_current_velocity / 1.852 : null;
+
+  // Barometric tendency over the last three hours, the old glass-tapping habit.
+  let ptrend = "";
+  if (w && w.hourly && w.hourly.pressure_msl){
+    const pi = nearestIdx(w.hourly.time, off);
+    if (pi >= 3 && isFinite(w.hourly.pressure_msl[pi]) && isFinite(w.hourly.pressure_msl[pi-3])){
+      const dP = w.hourly.pressure_msl[pi] - w.hourly.pressure_msl[pi-3];
+      const word = Math.abs(dP) < 1 ? "steady"
+                 : (dP > 0 ? "rising" : "falling") + (Math.abs(dP) >= 3.5 ? " quickly" : "");
+      ptrend = `<em>${word}${Math.abs(dP) >= 1 ? " " + Math.abs(dP).toFixed(1) + "/3h" : ""}</em>`;
+    }
+  }
 
   // Swell from the hourly series at the nearest hour.
   let sw = {};
@@ -1434,7 +1588,26 @@ function conditionsSection(w, m, off){
     }
   }
 
-  return `<section><div class="two">
+  // Tidal stream through the next sixteen hours, every two hours — the SMOC
+  // model behind it carries the tide, so the arrows swing with the flood and ebb.
+  let stream = "";
+  if (m && m.hourly && m.hourly.ocean_current_velocity && m.hourly.ocean_current_direction){
+    const H = m.hourly, moff = m.utc_offset_seconds || 0;
+    const i0 = nearestIdx(H.time, moff);
+    if (i0 >= 0){
+      let cells = "";
+      for (let k2 = 0; k2 < 8; k2++){
+        const i = i0 + k2*2;
+        if (i >= H.time.length) break;
+        const v = H.ocean_current_velocity[i], dd = H.ocean_current_direction[i];
+        if (v == null || dd == null) continue;
+        cells += `<div class="tsc"><span class="th mono">${fmtT(epochOf(H.time[i], moff), moff)}</span>${arrowSvg((dd+180)%360)}<span class="tv mono">${(v/1.852).toFixed(1)}</span></div>`;
+      }
+      if (cells) stream = `<div class="tstrip"><span class="eyebrow">Tidal stream · kn · arrows fly with the set</span>${cells}</div>`;
+    }
+  }
+
+  return `<section id="sec-now" data-nav="Now"><div class="two">
     <div class="pane">
       <span class="eyebrow">Ashore</span>
       <div class="headline">
@@ -1445,13 +1618,14 @@ function conditionsSection(w, m, off){
         </div>
       </div>
       <div class="rows">
-        <div class="row"><span class="k">Wind</span><span class="v">${arrowSvg(c.wind_direction_10m || 0)}<span class="mono">${num(c.wind_speed_10m,0)} kn</span> <em>${compass(c.wind_direction_10m||0)} · F${bf.f} ${esc(bf.name)}</em></span></div>
-        <div class="row"><span class="k">Gusts</span><span class="v mono">${num(c.wind_gusts_10m,0)} kn<em>${num(mph,0)} mph mean</em></span></div>
-        <div class="row"><span class="k">Pressure</span><span class="v mono">${num(c.pressure_msl,0)} hPa</span></div>
+        <div class="row"><span class="k">Wind</span><span class="v">${arrowSvg(wd || 0)}<span class="mono">${num(ws,0)} kn</span> <em>${compass(wd||0)} · F${bf.f} ${esc(bf.name)}</em></span></div>
+        <div class="row"><span class="k">Gusts</span><span class="v mono">${num(wg,0)} kn<em>${num(mph,0)} mph mean</em></span></div>
+        <div class="row"><span class="k">Pressure</span><span class="v mono">${num(c.pressure_msl,0)} hPa${ptrend}</span></div>
         <div class="row"><span class="k">Cloud · Humidity</span><span class="v mono">${num(c.cloud_cover,0)}% · ${num(c.relative_humidity_2m,0)}%</span></div>
         <div class="row"><span class="k">Rain now</span><span class="v mono">${num(c.precipitation,1)} mm</span></div>
         <div class="row"><span class="k">Sun</span><span class="v mono">${esc(sunTxt)}</span></div>
       </div>
+      ${hires ? `<div class="srcnote">Wind from the Met Office UKV model on its 2 km grid — fine enough to see round headlands. The rest is the blended forecast.</div>` : ""}
     </div>
     <div class="pane">
       <span class="eyebrow">Afloat</span>
@@ -1473,8 +1647,29 @@ function conditionsSection(w, m, off){
         <div class="row"><span class="k">Current</span><span class="v">${mc.ocean_current_direction != null ? arrowSvg((mc.ocean_current_direction+180)%360) : ""}<span class="mono">${num(cur,1)} kn</span> <em>${mc.ocean_current_direction != null ? "setting " + compass(mc.ocean_current_direction) : ""}</em></span></div>
         <div class="row"><span class="k">Visibility</span><span class="v mono">${vis != null ? (vis/1000).toFixed(1) + " km" : "—"}</span></div>
       </div>
+      ${stream}
     </div>
   </div></section>`;
+}
+
+function synSection(){
+  const cur = SYN_CHARTS.find(x => x.k === state.syn) || SYN_CHARTS[0];
+  return `<section id="sec-syn" data-nav="Synoptic">
+    <div class="shead"><span class="eyebrow">Synoptic · fronts &amp; isobars</span>
+      <span class="seg">${SYN_CHARTS.map(x =>
+        `<button data-syn="${x.k}" aria-pressed="${x.k === cur.k}">${x.label}</button>`).join("")}</span>
+    </div>
+    <div class="tidebox">
+      <div class="synwrap" id="synwrap">
+        <a href="${cur.url}" target="_blank" rel="noopener" title="Open the full-size chart">
+          <img id="synimg" src="${cur.url}" alt="North Atlantic surface ${cur.k === "now" ? "analysis" : "forecast"} chart with fronts and isobars" loading="lazy" decoding="async"></a>
+      </div>
+      <div class="legend">
+        <span>NOAA Ocean Prediction Center surface ${cur.k === "now" ? "analysis" : "forecast"} · North Atlantic${cur.k === "now" ? "" : " — the British Isles sit at the right-hand edge"}</span>
+        <span style="margin-left:auto">tap the chart for full size</span>
+      </div>
+    </div>
+  </section>`;
 }
 
 function daysSection(w, m, tide, off){
@@ -1498,7 +1693,7 @@ function daysSection(w, m, tide, off){
       <span class="mini mono">${num(dl.precipitation_probability_max ? dl.precipitation_probability_max[i] : null,0)}% rain</span>
     </div>`;
   }
-  return `<section><div class="shead"><span class="eyebrow">Week ahead</span></div>
+  return `<section id="sec-week" data-nav="Week"><div class="shead"><span class="eyebrow">Week ahead</span></div>
     <div class="days">${cells}</div></section>`;
 }
 
@@ -1524,14 +1719,16 @@ function tableSection(tide, off, D){
         <span class="h sea">${(e.h + D).toFixed(2)} m</span></span>`).join("")}</div>
     </div>`;
   }
-  return `<section><div class="shead"><span class="eyebrow">High and low water</span>
+  return `<section id="sec-tt" data-nav="HW·LW"><div class="shead"><span class="eyebrow">High and low water</span>
     <span class="eyebrow">${D ? "above chart datum" : "relative to mean sea level"}</span></div>
     <div class="tt">${rows}</div></section>`;
 }
 
 function footerHtml(m, tide){
   return `<footer>
-    Weather from national meteorological services via Open-Meteo. Waves, sea temperature, currents and sea level from Copernicus Marine (MeteoFrance SMOC and MFWAM) via Open-Meteo.
+    Weather from national meteorological services via Open-Meteo, with wind over the British Isles from the Met Office UKV model on its 2 km grid.
+    Waves, sea temperature, currents and sea level from Copernicus Marine (MeteoFrance SMOC and MFWAM) via Open-Meteo — the tidal stream arrows carry the tide but not local eddies.
+    Synoptic charts by the NOAA Ocean Prediction Center.
     Storm overflow status straight from the water companies' event-duration monitors via the Stream open data platform (the National Storm Overflow Hub, England only; refreshed every ten minutes,
     and a monitor saying nothing is not the same as nothing happening). Map tiles © OpenStreetMap contributors.<br>
     Sea level is modelled on an 8 km grid and referenced to mean sea level, not chart datum. In a place as awkward as the Solent it will read a few minutes and a few tenths out.
@@ -1637,8 +1834,10 @@ async function removePlace(id){
   render();
 }
 
+let searchSeq = 0;
 async function search(q){
   const box = $("#results");
+  const seq = ++searchSeq;   // a slow earlier response must not clobber a newer one
   q = q.trim();
   if (q.length < 2){ box.innerHTML = ""; return; }
 
@@ -1654,6 +1853,7 @@ async function search(q){
   box.innerHTML = `<div class="skel" style="height:44px"></div>`;
   try {
     const j = await jget("https://geocoding-api.open-meteo.com/v1/search?count=8&language=en&format=json&name=" + encodeURIComponent(q));
+    if (seq !== searchSeq) return;
     const rs = (j && j.results) || [];
     if (!rs.length){ box.innerHTML = `<p style="font-size:13px;color:var(--ink-3);padding:6px 0">Nothing found. Try a nearby town, or paste coordinates as <span class="mono">50.718 -1.106</span>.</p>`; return; }
     box.innerHTML = `<ul class="res">` + rs.map(r => {
@@ -1663,6 +1863,7 @@ async function search(q){
     }).join("") + `</ul>`;
     bindResults(box);
   } catch (e){
+    if (seq !== searchSeq) return;
     box.innerHTML = isBlocked(e && e.message)
       ? `<p style="font-size:13px;color:var(--ink-3);padding:6px 0;line-height:1.6">Search needs network access this preview doesn't have. Paste coordinates instead — <span class="mono">50.718 -1.106</span> — which works offline.</p>`
       : `<p style="font-size:13px;color:var(--ink-3);padding:6px 0">Search is unreachable. Paste coordinates instead, like <span class="mono">50.718 -1.106</span>.</p>`;
@@ -1683,6 +1884,9 @@ async function saveState(){ await Store.set(K_STATE, state); }
 function applyTheme(){
   document.documentElement.setAttribute("data-theme", state.theme);
   $("#themeBtn").title = state.theme === "night" ? "Switch to chart mode" : "Switch to night mode";
+  // Keep the browser chrome in step with the chosen theme, not the OS one.
+  const tc = state.theme === "night" ? "#06131A" : "#F3F5F0";
+  document.querySelectorAll('meta[name="theme-color"]').forEach(m2 => m2.content = tc);
 }
 
 window.__retry = () => loadAll();
