@@ -33,6 +33,7 @@
   --mark:#C10070;
   --mark-soft:rgba(193,0,112,.12);
   --amber:#A87900;
+  --good:#177A50;
   --night-band:rgba(14,32,41,.055);
   --shadow:0 1px 0 rgba(14,32,41,.05);
 }
@@ -52,6 +53,7 @@
   --mark:#FF4FAC;
   --mark-soft:rgba(255,79,172,.16);
   --amber:#E0B54A;
+  --good:#3CC28F;
   --night-band:rgba(255,255,255,.035);
   --shadow:none;
 }
@@ -219,6 +221,20 @@ section{padding:22px 0;border-bottom:1px solid var(--rule-soft);scroll-margin-to
 .sewmap{position:relative;overflow:hidden;background:var(--shoal);border-top:1px solid var(--rule-soft);touch-action:none;user-select:none;-webkit-user-select:none}
 .sewmap img{position:absolute;width:256px;height:256px;max-width:none;filter:saturate(.4) contrast(.95);pointer-events:none}
 :root[data-theme="night"] .sewmap img{filter:invert(1) hue-rotate(180deg) saturate(.3) brightness(.85) contrast(.92)}
+.sewmap img.rimg{opacity:.62;filter:none}
+:root[data-theme="night"] .sewmap img.rimg{filter:none;opacity:.55}
+.slayers{position:absolute;top:8px;left:8px;display:flex;gap:6px;align-items:center}
+.slayers button{
+  appearance:none;border:1px solid var(--rule);background:var(--panel);color:var(--ink-2);
+  height:26px;padding:0 9px;border-radius:2px;cursor:pointer;font-size:10px;letter-spacing:.09em;
+  text-transform:uppercase;font-weight:650;font-family:ui-monospace,Menlo,monospace;box-shadow:var(--shadow);
+}
+.slayers button:hover{color:var(--mark)}
+.slayers button[aria-pressed="true"]{background:var(--mark);border-color:var(--mark);color:#fff}
+.slayers .rtime{
+  font-size:10px;background:var(--panel);border:1px solid var(--rule);border-radius:2px;
+  height:26px;display:inline-flex;align-items:center;padding:0 8px;color:var(--ink-2);
+}
 .sewmap svg{display:block;position:absolute;inset:0}
 .smw{position:absolute;inset:0;cursor:grab}
 .smw:active{cursor:grabbing}
@@ -493,13 +509,37 @@ const SYN_CHARTS = [
 const UKV_BOX = { la0:49.3, la1:61.2, lo0:-8.8, lo1:2.4 };
 const inUKV = p => p.lat >= UKV_BOX.la0 && p.lat <= UKV_BOX.la1 && p.lon >= UKV_BOX.lo0 && p.lon <= UKV_BOX.lo1;
 
+/* Rain radar composite from RainViewer — keyless, worldwide, ten-minute
+   frames covering roughly the last two hours plus a short nowcast. */
+const RAIN_INDEX = "https://api.rainviewer.com/public/weather-maps.json";
+
+/* Beach layers: Environment Agency designated bathing waters with their
+   annual classification (England, Open Government Licence), and RNLI
+   lifeguarded beaches. Both public, keyless, CORS-open. */
+function bwUrl(p, km){
+  const dLat = km/111, dLon = km/(111*Math.cos(p.lat*Math.PI/180));
+  const bbox = [(p.lat-dLat).toFixed(4), (p.lon-dLon).toFixed(4), (p.lat+dLat).toFixed(4), (p.lon+dLon).toFixed(4)].join(",");
+  return "https://environment.data.gov.uk/geoservices/datasets/fb8da72f-4938-4100-ac91-d9b8438ffd4c/wfs" +
+    "?service=WFS&version=2.0.0&request=GetFeature" +
+    "&typeNames=dataset-fb8da72f-4938-4100-ac91-d9b8438ffd4c:Bathing_Waters_Monitoring_Locations" +
+    "&outputFormat=application/json&srsName=urn:ogc:def:crs:EPSG::4326&count=120" +
+    "&bbox=" + bbox + ",urn:ogc:def:crs:EPSG::4326";
+}
+function rnliUrl(p, km){
+  return "https://services1.arcgis.com/evM5NkxAYjTi6XPw/arcgis/rest/services/RNLI_Lifeguard_Units/FeatureServer/0/query" +
+    "?f=json&where=1%3D1&geometry=" + p.lon + "," + p.lat +
+    "&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects" +
+    "&distance=" + (km*1000) + "&units=esriSRUnit_Meter" +
+    "&outFields=Name,Beach_URL&returnGeometry=true&outSR=4326&resultRecordCount=100";
+}
+
 const REFRESH_MS = 10 * 60 * 1000;
 const FETCH_TIMEOUT = 14000;
 
 /* ==================================================================
    State
    ================================================================== */
-let state = { places: SEED.slice(), activeId: "seaview", theme: "chart", window: 48, sewKm: 10, syn: "now" };
+let state = { places: SEED.slice(), activeId: "seaview", theme: "chart", window: 48, sewKm: 10, syn: "now", rain: false, beach: true };
 let data  = {};   // id -> { weather, marine, fetchedAt, error }
 let ticker = null, resizeTimer = null, searchTimer = null;
 
@@ -536,6 +576,25 @@ const compass = d => ["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","
 const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 const fmtDM = (ep, off) => { const d = new Date(ep + off*1000); return d.getUTCDate() + " " + MONTHS[d.getUTCMonth()]; };
 const titleCase = s => s ? String(s).toLowerCase().replace(/(^|[\s(/-])[a-z]/g, m => m.toUpperCase()) : "";
+
+function uvWord(v){
+  if (!(v >= 0)) return "";
+  return v < 3 ? "low" : v < 6 ? "moderate" : v < 8 ? "high" : v < 11 ? "very high" : "extreme";
+}
+
+// Moon phase and the springs/neaps rhythm, computed locally — no API has to
+// tell us where the moon is. Reference new moon: 2000-01-06 18:14 UTC.
+function moonInfo(now){
+  const syn = 29.530588853;
+  const age = (((now - 947182440000) / 86400000) % syn + syn) % syn;
+  const names = ["New moon","Waxing crescent","First quarter","Waxing gibbous","Full moon","Waning gibbous","Last quarter","Waning crescent"];
+  const name = names[Math.floor(((age + syn/16) % syn) / (syn/8))];
+  // Distance from the nearest syzygy (new or full), when spring tides follow.
+  const half = syn / 2;
+  const d = Math.min(age % half, half - (age % half));
+  const tides = d < 3 ? "spring tides" : Math.abs(d - half/2) < 3 ? "neap tides" : "mid cycle";
+  return { name, tides };
+}
 
 function distBrg(lat1, lon1, lat2, lon2){
   const toR = Math.PI/180;
@@ -628,9 +687,9 @@ async function jget(url){
 
 function weatherUrl(p){
   return "https://api.open-meteo.com/v1/forecast?latitude=" + p.lat + "&longitude=" + p.lon +
-    "&current=temperature_2m,apparent_temperature,relative_humidity_2m,is_day,precipitation,weather_code,cloud_cover,pressure_msl,wind_speed_10m,wind_direction_10m,wind_gusts_10m" +
+    "&current=temperature_2m,apparent_temperature,relative_humidity_2m,is_day,precipitation,weather_code,cloud_cover,pressure_msl,wind_speed_10m,wind_direction_10m,wind_gusts_10m,uv_index" +
     "&hourly=temperature_2m,precipitation_probability,weather_code,wind_speed_10m,wind_gusts_10m,wind_direction_10m,visibility,is_day,pressure_msl" +
-    "&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset,precipitation_sum,precipitation_probability_max,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant" +
+    "&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset,precipitation_sum,precipitation_probability_max,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant,uv_index_max" +
     "&wind_speed_unit=kn&timezone=auto&forecast_days=7&past_days=1";
 }
 function ukvUrl(p){
@@ -760,6 +819,116 @@ function ensureSewage(p){
     Store.set(K_CACHE, data);
     if (state.activeId === p.id) render();
   }).catch(() => sewLoading.delete(p.id));
+}
+
+/* ==================================================================
+   Beach layers — bathing water classifications and lifeguarded
+   beaches, cached per place; rain radar frames, cached globally.
+   ================================================================== */
+function parseBw(j, p, km){
+  const out = [];
+  for (const f of (j && j.features) || []){
+    const g = f.geometry && f.geometry.coordinates;
+    const pr = f.properties || {};
+    if (!g || g.length < 2) continue;
+    // Some WFS servers honour urn axis order (lat first), some don't.
+    const latFirst = g[0] >= 45 && g[0] <= 62 && Math.abs(g[1]) <= 12;
+    const lat = latFirst ? g[0] : g[1], lon = latFirst ? g[1] : g[0];
+    if (!isFinite(lat) || !isFinite(lon)) continue;
+    let cls = null, yr = null;
+    for (let y = 2035; y >= 2015; y--){
+      const v = pr["class_" + y];
+      if (v && v !== "un-assessed"){ cls = String(v); yr = y; break; }
+    }
+    const { d, b } = distBrg(p.lat, p.lon, lat, lon);
+    if (d > km * 1.5) continue;
+    out.push({ name: pr.bw_name ? String(pr.bw_name) : "Bathing water", ref: pr.bw_ref ? String(pr.bw_ref) : "", cls, yr, lat, lon, dist: d, brg: b });
+  }
+  out.sort((a, b2) => a.dist - b2.dist);
+  return out;
+}
+
+function parseLg(j, p){
+  const out = [];
+  for (const f of (j && j.features) || []){
+    if (!f.geometry || !f.attributes) continue;
+    const lat = f.geometry.y, lon = f.geometry.x;
+    if (!isFinite(lat) || !isFinite(lon)) continue;
+    const { d, b } = distBrg(p.lat, p.lon, lat, lon);
+    out.push({ name: f.attributes.Name ? String(f.attributes.Name) : "Lifeguarded beach", url: f.attributes.Beach_URL ? String(f.attributes.Beach_URL) : "", lat, lon, dist: d, brg: b });
+  }
+  out.sort((a, b2) => a.dist - b2.dist);
+  return out;
+}
+
+function bwColor(cls){
+  if (cls === "Excellent") return "var(--good)";
+  if (cls === "Good") return "var(--shoal-deep)";
+  if (cls === "Sufficient") return "var(--amber)";
+  if (cls === "Poor") return "var(--mark)";
+  return "var(--ink-3)";
+}
+
+const beachLoading = new Set();
+function ensureBeach(p){
+  if (!state.beach || !p || !data[p.id] || beachLoading.has(p.id)) return;
+  const b = data[p.id].beach;
+  // Classifications are annual and lifeguard cover seasonal — an hour's cache is plenty.
+  if (b && b.radius === state.sewKm && Date.now() - (b.fetchedAt || 0) < 6 * REFRESH_MS) return;
+  beachLoading.add(p.id);
+  Promise.allSettled([ jget(bwUrl(p, state.sewKm)), jget(rnliUrl(p, state.sewKm)) ]).then(([bw, lg]) => {
+    beachLoading.delete(p.id);
+    if (!data[p.id]) return;
+    data[p.id].beach = {
+      bw: bw.status === "fulfilled" ? parseBw(bw.value, p, state.sewKm) : ((b && b.bw) || []),
+      lg: lg.status === "fulfilled" ? parseLg(lg.value, p) : ((b && b.lg) || []),
+      fetchedAt: Date.now(),
+      radius: state.sewKm
+    };
+    Store.set(K_CACHE, data);
+    if (state.activeId === p.id) render();
+  }).catch(() => beachLoading.delete(p.id));
+}
+
+let rainData = null, rainTimer = null, rainLoading = false;
+async function ensureRain(){
+  if (!state.rain || rainLoading) return;
+  if (rainData && Date.now() - rainData.fetchedAt < 5 * 60000) return;
+  rainLoading = true;
+  try {
+    const j = await jget(RAIN_INDEX);
+    const past = (j.radar && j.radar.past) || [];
+    const cast = (j.radar && j.radar.nowcast) || [];
+    rainData = {
+      host: j.host || "https://tilecache.rainviewer.com",
+      frames: [...past, ...cast],
+      idx: Math.max(0, past.length - 1),
+      playing: rainData ? rainData.playing : false,
+      fetchedAt: Date.now()
+    };
+    renderSewMap();
+  } catch {} finally { rainLoading = false; }
+}
+
+// RainViewer serves radar up to zoom 7 (512 px tiles double the detail).
+// Beyond that we stretch the coarse tiles — the radar itself is ~1 km data,
+// so over-zooming loses nothing real.
+const RAIN_MAX_Z = 7;
+function rainTileUrl(f, z, x, y){
+  return rainData.host + f.path + "/512/" + z + "/" + x + "/" + y + "/2/1_1.png";
+}
+
+function rainTick(){
+  const rd = rainData;
+  if (!rd || !rd.frames.length) return;
+  rd.idx = (rd.idx + 1) % rd.frames.length;
+  const f = rd.frames[rd.idx];
+  document.querySelectorAll("#sewmap img.rimg").forEach(img => {
+    const [z, x, y] = img.dataset.t.split(",");
+    img.src = rainTileUrl(f, z, x, y);
+  });
+  const t = document.querySelector("#sewmap .rtime");
+  if (t) t.textContent = fmtT(f.time * 1000, sewMap.off);
 }
 
 /* ==================================================================
@@ -964,13 +1133,19 @@ function sewMercator(z){
 
 // One live view: centre, zoom and selection survive refreshes and re-renders,
 // reset when the place or the search radius changes.
-const sewMap = { pid:null, km:0, lat:0, lon:0, z:0, sel:null, off:0, el:null, place:null, items:[] };
+const sewMap = { pid:null, km:0, lat:0, lon:0, z:0, sel:null, off:0, el:null, place:null, items:[], bw:[], lg:[] };
 
 function drawSewMap(el, place, items, km, off){
   if (sewMap.pid !== place.id || sewMap.km !== km){
     Object.assign(sewMap, { pid: place.id, km, sel: null, lat: place.lat, lon: place.lon, z: 0 });
   }
-  Object.assign(sewMap, { el, place, items, off: off != null ? off : sewMap.off });
+  const beach = data[place.id] && data[place.id].beach;
+  Object.assign(sewMap, {
+    el, place, items,
+    bw: (beach && beach.bw) || [],
+    lg: (beach && beach.lg) || [],
+    off: off != null ? off : sewMap.off
+  });
   if (!sewMap.z){
     const W = Math.max(el.clientWidth || 640, 280), H = W < 560 ? 240 : 320;
     const mpp0 = 156543.03392 * Math.cos(place.lat * Math.PI/180);
@@ -994,12 +1169,30 @@ function renderSewMap(){
   for (let tx = tx0; tx <= tx1; tx++){
     for (let ty = ty0; ty <= ty1; ty++){
       const wrapped = ((tx % n) + n) % n;
-      // OSM first; if its volunteer servers decline, fall back to Esri's ocean
-      // basemap (also keyless), and failing both just leave the shoal blue.
-      const esri = `https://services.arcgisonline.com/arcgis/rest/services/Ocean/World_Ocean_Base/MapServer/tile/${sewMap.z}/${ty}/${wrapped}`;
+      // OSM first; if its volunteer servers decline, fall back to Carto's
+      // light basemap (also keyless, every zoom), else leave the shoal blue.
+      const carto = `https://basemaps.cartocdn.com/light_all/${sewMap.z}/${wrapped}/${ty}.png`;
       tiles += `<img src="https://tile.openstreetmap.org/${sewMap.z}/${wrapped}/${ty}.png" alt="" loading="lazy" decoding="async"
         style="left:${(tx*256 - left).toFixed(1)}px;top:${(ty*256 - top).toFixed(1)}px"
-        onerror="if(!this.dataset.f){this.dataset.f=1;this.src='${esri}'}else{this.remove()}">`;
+        onerror="if(!this.dataset.f){this.dataset.f=1;this.src='${carto}'}else{this.remove()}">`;
+    }
+  }
+
+  // Radar overlay on its own (coarser) grid, stretched to the display zoom.
+  let rain = "";
+  const rf = state.rain && rainData && rainData.frames.length ? rainData.frames[rainData.idx] : null;
+  if (rf){
+    const rz = Math.min(sewMap.z, RAIN_MAX_Z);
+    const rn = Math.pow(2, rz);
+    const rt = 256 * Math.pow(2, sewMap.z - rz);   // screen px per radar tile
+    const rx0 = Math.floor(left/rt), rx1 = Math.floor((left + W)/rt);
+    const ry0 = Math.max(0, Math.floor(top/rt)), ry1 = Math.min(rn-1, Math.floor((top + H)/rt));
+    for (let rx = rx0; rx <= rx1; rx++){
+      for (let ry = ry0; ry <= ry1; ry++){
+        const wrapped = ((rx % rn) + rn) % rn;
+        rain += `<img class="rimg" data-t="${rz},${wrapped},${ry}" src="${rainTileUrl(rf, rz, wrapped, ry)}" alt="" loading="lazy" decoding="async"
+          style="left:${(rx*rt - left).toFixed(1)}px;top:${(ry*rt - top).toFixed(1)}px;width:${rt}px;height:${rt}px" onerror="this.remove()">`;
+      }
     }
   }
 
@@ -1007,14 +1200,43 @@ function renderSewMap(){
   const ring = (km * 1000 / mpp).toFixed(1);
   const hx = (M.x(place.lon) - left).toFixed(1), hy = (M.y(place.lat) - top).toFixed(1);
 
-  // Idle first so anything discharging paints on top; selected halo below its marker.
   const now = Date.now();
+  let marks = "";
+  const halo = (X, Y) => `<circle cx="${X}" cy="${Y}" r="9.5" fill="none" stroke="var(--mark)" stroke-width="1.6"/>`;
+  const hit = (X, Y) => `<circle cx="${X}" cy="${Y}" r="12" fill="transparent" stroke="none"/>`;
+
+  // Beach layers underneath: bathing waters as classification diamonds,
+  // lifeguarded beaches as pennants.
+  if (state.beach){
+    for (let i = 0; i < sewMap.bw.length; i++){
+      const it = sewMap.bw[i];
+      const X = +(M.x(it.lon) - left).toFixed(1), Y = +(M.y(it.lat) - top).toFixed(1);
+      const pin = "bw:" + (it.ref || i);
+      const c = bwColor(it.cls);
+      marks += `<g data-pin="${esc(pin)}" tabindex="0" role="button" aria-label="${esc(it.name + " bathing water, " + (it.cls || "unclassified"))}">
+        ${pin === sewMap.sel ? halo(X, Y) : ""}
+        <path d="M${X} ${Y-5.4} L${X+5.4} ${Y} L${X} ${Y+5.4} L${X-5.4} ${Y} Z" fill="${c}" stroke="#fff" stroke-width="1.2"/>
+        ${hit(X, Y)}<title>${esc(it.name + " — " + (it.cls ? it.cls + " (" + it.yr + ")" : "unclassified"))}</title></g>`;
+    }
+    for (let i = 0; i < sewMap.lg.length; i++){
+      const it = sewMap.lg[i];
+      const X = +(M.x(it.lon) - left).toFixed(1), Y = +(M.y(it.lat) - top).toFixed(1);
+      const pin = "lg:" + i;
+      marks += `<g data-pin="${esc(pin)}" tabindex="0" role="button" aria-label="${esc(it.name + ", RNLI lifeguarded beach")}">
+        ${pin === sewMap.sel ? halo(X, Y + 3) : ""}
+        <line x1="${X}" y1="${Y+5}" x2="${X}" y2="${Y-7}" stroke="#fff" stroke-width="2.8" stroke-linecap="round"/>
+        <line x1="${X}" y1="${Y+5}" x2="${X}" y2="${Y-7}" stroke="var(--ink)" stroke-width="1.3" stroke-linecap="round"/>
+        <path d="M${X} ${Y-7} l7 2.6 -7 2.6 Z" fill="#D9482B" stroke="#fff" stroke-width="0.9"/>
+        ${hit(X, Y)}<title>${esc(it.name + " — RNLI lifeguarded beach")}</title></g>`;
+    }
+  }
+
+  // Outfalls on top — idle first so anything discharging paints last.
   const order = { idle:0, offline:1, recent:2, active:3 };
   const sorted = items.map(it => ({ it, st: sewState(it, now) })).sort((a,b) => order[a.st] - order[b.st]);
-  let marks = "";
   for (const { it, st } of sorted){
     const X = (M.x(it.lon) - left).toFixed(1), Y = (M.y(it.lat) - top).toFixed(1);
-    const key = sewKey(it);
+    const pin = "sew:" + sewKey(it);
     const what = st === "active" ? "discharging now" : st === "recent" ? "discharged in last 48 h"
                : st === "offline" ? "monitor offline" : "not discharging";
     const tip = `<title>${esc((titleCase(it.water) || it.id) + " · " + it.company + " — " + what)}</title>`;
@@ -1029,23 +1251,67 @@ function renderSewMap(){
     } else {
       dot = `<circle cx="${X}" cy="${Y}" r="3.2" fill="var(--panel)" stroke="var(--shoal-deep)" stroke-width="1.6"/>`;
     }
-    const halo = key === sewMap.sel ? `<circle cx="${X}" cy="${Y}" r="9" fill="none" stroke="var(--mark)" stroke-width="1.6"/>` : "";
-    marks += `<g data-sew="${esc(key)}" tabindex="0" role="button" aria-label="${esc((titleCase(it.water) || it.id) + ", " + what)}">
-      ${halo}${dot}<circle cx="${X}" cy="${Y}" r="12" fill="transparent" stroke="none"/>${tip}</g>`;
+    marks += `<g data-pin="${esc(pin)}" tabindex="0" role="button" aria-label="${esc((titleCase(it.water) || it.id) + ", " + what)}">
+      ${pin === sewMap.sel ? halo(X, Y) : ""}${dot}${hit(X, Y)}${tip}</g>`;
   }
 
-  const selIt = sewMap.sel ? items.find(it => sewKey(it) === sewMap.sel) : null;
+  const layers = `<div class="slayers">
+    <button data-lyr="rain" aria-pressed="${!!state.rain}">Rain</button>
+    <button data-lyr="beach" aria-pressed="${!!state.beach}">Beaches</button>
+    ${rf ? `<button data-rplay aria-label="${rainData.playing ? "Pause" : "Play"} the radar loop">${rainData.playing ? "❚❚" : "▶"}</button>
+            <span class="rtime mono">${fmtT(rf.time * 1000, sewMap.off)}</span>` : ""}
+  </div>`;
+
   el.style.height = H + "px";
-  el.innerHTML = `<div class="smw">${tiles}
-    <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" aria-label="Storm overflows within ${km} km">
+  el.innerHTML = `<div class="smw">${tiles}${rain}
+    <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" aria-label="Beach and storm overflow map, ${km} km radius">
       <circle cx="${hx}" cy="${hy}" r="${ring}" fill="none" stroke="var(--mark)" stroke-width="1" stroke-dasharray="3 5" opacity=".55"/>
       <g stroke="#fff" stroke-width="3.6" stroke-linecap="round" opacity=".85"><line x1="${hx-7}" y1="${hy}" x2="${+hx+7}" y2="${hy}"/><line x1="${hx}" y1="${hy-7}" x2="${hx}" y2="${+hy+7}"/></g>
       <g stroke="var(--ink)" stroke-width="1.5" stroke-linecap="round"><line x1="${hx-7}" y1="${hy}" x2="${+hx+7}" y2="${hy}"/><line x1="${hx}" y1="${hy-7}" x2="${hx}" y2="${+hy+7}"/></g>
       ${marks}
     </svg></div>
+    ${layers}
     <div class="szoom"><button data-sz="1" aria-label="Zoom in">+</button><button data-sz="-1" aria-label="Zoom out">−</button></div>
-    ${selIt ? sewCard(selIt, sewState(selIt, now), sewMap.off, now) : ""}
-    <span class="osm">© OpenStreetMap · Esri</span>`;
+    ${pinCard(now)}
+    <span class="osm">© OpenStreetMap · Carto</span>`;
+
+  clearInterval(rainTimer);
+  if (rf && rainData.playing) rainTimer = setInterval(rainTick, 700);
+}
+
+function pinCard(now){
+  const sel = sewMap.sel;
+  if (!sel) return "";
+  if (sel.startsWith("sew:")){
+    const it = sewMap.items.find(x => "sew:" + sewKey(x) === sel);
+    return it ? sewCard(it, sewState(it, now), sewMap.off, now) : "";
+  }
+  if (sel.startsWith("bw:")){
+    const key = sel.slice(3);
+    const it = sewMap.bw.find((x, i) => (x.ref || String(i)) === key);
+    if (!it) return "";
+    const g = `https://maps.google.com/?q=${it.lat.toFixed(5)},${it.lon.toFixed(5)}`;
+    return `<div class="scard" style="border-left-color:${bwColor(it.cls)}">
+      <button class="x" data-sclose aria-label="Close">×</button>
+      <span class="sw" style="background:${bwColor(it.cls)};color:#fff">${esc((it.cls || "N/A").toUpperCase())}</span> <b class="sea">${esc(it.name)}</b>
+      <div class="meta">Designated bathing water · EA classification${it.yr ? " " + it.yr : ""}</div>
+      <div class="meta2">${it.dist.toFixed(1)} km ${compass(it.brg)} of here</div>
+      <div class="links"><a href="${g}" target="_blank" rel="noopener">Google Maps</a></div>
+    </div>`;
+  }
+  if (sel.startsWith("lg:")){
+    const it = sewMap.lg[Number(sel.slice(3))];
+    if (!it) return "";
+    const g = `https://maps.google.com/?q=${it.lat.toFixed(5)},${it.lon.toFixed(5)}`;
+    return `<div class="scard" style="border-left-color:#D9482B">
+      <button class="x" data-sclose aria-label="Close">×</button>
+      <span class="sw" style="background:#D9482B;color:#fff">RNLI</span> <b class="sea">${esc(it.name)}</b>
+      <div class="meta">Lifeguarded beach — check patrol season and flags on the day</div>
+      <div class="meta2">${it.dist.toFixed(1)} km ${compass(it.brg)} of here</div>
+      <div class="links">${it.url ? `<a href="${esc(it.url)}" target="_blank" rel="noopener">RNLI page</a>` : ""}<a href="${g}" target="_blank" rel="noopener">Google Maps</a></div>
+    </div>`;
+  }
+  return "";
 }
 
 function sewCard(it, st, off, now){
@@ -1088,12 +1354,22 @@ function bindSewMap(el){
   el.addEventListener("click", e => {
     const zb = e.target.closest("[data-sz]");
     if (zb){ sewZoomAt(Number(zb.dataset.sz)); return; }
-    if (e.target.closest("[data-sclose]")){ sewMap.sel = null; renderSewMap(); }
+    if (e.target.closest("[data-sclose]")){ sewMap.sel = null; renderSewMap(); return; }
+    const ly = e.target.closest("[data-lyr]");
+    if (ly){
+      if (ly.dataset.lyr === "rain"){ state.rain = !state.rain; if (state.rain) ensureRain(); }
+      else { state.beach = !state.beach; if (state.beach && sewMap.place) ensureBeach(sewMap.place); }
+      saveState(); renderSewMap(); return;
+    }
+    if (e.target.closest("[data-rplay]") && rainData){
+      rainData.playing = !rainData.playing;
+      renderSewMap();
+    }
   });
   el.addEventListener("keydown", e => {
     if (e.key !== "Enter" && e.key !== " ") return;
-    const g = e.target.closest && e.target.closest("g[data-sew]");
-    if (g){ e.preventDefault(); sewMap.sel = g.dataset.sew; renderSewMap(); }
+    const g = e.target.closest && e.target.closest("g[data-pin]");
+    if (g){ e.preventDefault(); sewMap.sel = g.dataset.pin; renderSewMap(); }
   });
   el.addEventListener("wheel", e => {
     if (e.target.closest(".scard")) return;
@@ -1101,7 +1377,7 @@ function bindSewMap(el){
     sewZoomAt(e.deltaY < 0 ? 1 : -1, e.clientX, e.clientY);
   }, { passive: false });
   el.addEventListener("dblclick", e => {
-    if (e.target.closest(".szoom") || e.target.closest(".scard")) return;
+    if (e.target.closest(".szoom") || e.target.closest(".scard") || e.target.closest(".slayers")) return;
     e.preventDefault();
     sewZoomAt(1, e.clientX, e.clientY);
   });
@@ -1119,7 +1395,7 @@ function bindSewMap(el){
   };
 
   el.addEventListener("pointerdown", e => {
-    if (e.target.closest(".szoom") || e.target.closest(".scard")) return;
+    if (e.target.closest(".szoom") || e.target.closest(".scard") || e.target.closest(".slayers")) return;
     try { el.setPointerCapture(e.pointerId); } catch {}
     ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (ptrs.size === 1){
@@ -1175,8 +1451,8 @@ function bindSewMap(el){
         sewMap.lat = M.lat(M.y(sewMap.lat) - dy);
         renderSewMap();
       } else if (!moved && e.type === "pointerup" && downTarget){
-        const g = downTarget.closest && downTarget.closest("g[data-sew]");
-        if (g){ sewMap.sel = g.dataset.sew === sewMap.sel ? null : g.dataset.sew; renderSewMap(); }
+        const g = downTarget.closest && downTarget.closest("g[data-pin]");
+        if (g){ sewMap.sel = g.dataset.pin === sewMap.sel ? null : g.dataset.pin; renderSewMap(); }
       } else {
         const w = wrap();
         if (w) w.style.transform = "";
@@ -1214,8 +1490,8 @@ function sewageSection(p, d, off){
   const s = d.sewage;
   const seg = `<span class="seg">` + SEW_RADII.map(k =>
     `<button data-sewkm="${k}" aria-pressed="${state.sewKm===k}">${k} km</button>`).join("") + `</span>`;
-  const head = `<div class="shead"><span class="eyebrow">Sewage · storm overflows</span>${seg}</div>`;
-  const open = `<section id="sec-sew" data-nav="Sewage">`;
+  const head = `<div class="shead"><span class="eyebrow">Beach watch · sewage · bathing water</span>${seg}</div>`;
+  const open = `<section id="sec-sew" data-nav="Beach">`;
 
   if (!s || (!s.items && !s.error)){
     return `${open}${head}<div class="skel" style="height:180px"></div></section>`;
@@ -1250,24 +1526,36 @@ function sewageSection(p, d, off){
         No monitored storm overflows within ${s.radius} km of this point. Coverage is the English water
         companies' event-duration monitors — try a wider radius, or a point nearer the English coast.</div></div>`;
   } else {
+    // Nearest rated bathing water, for the "can the kids swim here" question.
+    const bch = d.beach;
+    let bwLine = "";
+    if (state.beach && bch && bch.bw && bch.bw.length){
+      const nb = bch.bw.find(x => x.cls) || bch.bw[0];
+      const rated = bch.bw.filter(x => x.cls).length;
+      bwLine = `<div class="srcnote">Nearest bathing water: <b style="color:${bwColor(nb.cls)}">${esc(nb.name)}</b> — ${esc(nb.cls || "unclassified")}${nb.yr ? " (" + nb.yr + ")" : ""} · ${nb.dist.toFixed(1)} km ${compass(nb.brg)}${rated > 1 ? ` · ${rated} rated beaches within ${s.radius} km` : ""}</div>`;
+    }
     // Everything active or recent always shows; quiet outfalls fill up to twelve rows.
     const shown = [...act, ...rec, ...idle, ...offl].slice(0, Math.max(12, act.length + rec.length));
     const rest = withSt.length - shown.length;
     body = `<div class="pane" style="padding-bottom:13px">
       <div class="headline" style="margin-bottom:0">${drop}
         <div><div class="num" style="color:${col}">${big}</div><div class="desc">${desc}</div></div>
-      </div></div>
+      </div>${bwLine}</div>
       <div class="sewmap" id="sewmap"></div>
       <div class="sewlist">${shown.map(x => sewRow(x.it, x.st, off, now)).join("")}
       ${rest > 0 ? `<div class="sewmore">…and ${rest} more monitored outfall${rest>1?"s":""} within ${s.radius} km, none discharging.</div>` : ""}</div>`;
   }
 
+  const bch2 = d.beach;
+  const hasBeach = state.beach && bch2 && ((bch2.bw && bch2.bw.length) || (bch2.lg && bch2.lg.length));
   const legend = `<div class="legend">
     <span><i class="dotl" style="background:var(--mark)"></i>Discharging</span>
     <span><i class="dotl" style="background:var(--amber)"></i>Last 48 h</span>
     <span><i class="dotl" style="background:var(--panel);border:1.5px solid var(--shoal-deep)"></i>Quiet</span>
     <span><i class="dotl" style="border:1px dashed var(--ink-3)"></i>Monitor offline</span>
-    ${withSt.length ? `<span>Tap an outfall · drag to pan · pinch or scroll to zoom</span>` : ""}
+    ${hasBeach ? `<span><i class="dotl" style="background:var(--good);border-radius:1px;transform:rotate(45deg)"></i>Bathing water (colour = rating)</span>
+    <span><i class="dotl" style="background:#D9482B;border-radius:1px"></i>RNLI lifeguards</span>` : ""}
+    ${withSt.length ? `<span>Tap a marker · drag to pan · pinch or scroll to zoom</span>` : ""}
     ${s.failed ? `<span>${s.failed} of ${SEWAGE_SOURCES.length} feeds unreachable</span>` : ""}
     <span style="margin-left:auto">checked ${fmtT(s.fetchedAt, off)}</span>
   </div>`;
@@ -1413,7 +1701,7 @@ function render(){
     const it = s && s.items ? s.items.find(x => sewKey(x) === r.dataset.sewrow) : null;
     const el = $("#sewmap");
     if (!it || !el) return;
-    sewMap.sel = sewKey(it);
+    sewMap.sel = "sew:" + sewKey(it);
     sewMap.lat = it.lat; sewMap.lon = it.lon;
     sewMap.z = Math.max(sewMap.z, 14);
     renderSewMap();
@@ -1430,6 +1718,8 @@ function render(){
     syi.onerror = () => { syw.innerHTML = `<div class="synerr">Chart unavailable just now — NOAA may be redrawing it. It refreshes several times a day.</div>`; };
   }
   ensureSewage(p);
+  ensureBeach(p);
+  if (state.rain) ensureRain();
   renderNav();
   refreshStamp();
   startTicker();
@@ -1520,6 +1810,7 @@ function tideSection(tide){
         <span><i style="background:var(--shoal-deep)"></i>Water</span>
         <span><i style="background:var(--night-band);border:1px solid var(--rule)"></i>Darkness</span>
         <span><i style="background:var(--mark)"></i>Now</span>
+        <span style="margin-left:auto">${(m2 => m2.name + " · " + m2.tides)(moonInfo(Date.now()))}</span>
       </div>
     </div>
   </section>`;
@@ -1623,6 +1914,7 @@ function conditionsSection(w, m, off, ukv){
         <div class="row"><span class="k">Pressure</span><span class="v mono">${num(c.pressure_msl,0)} hPa${ptrend}</span></div>
         <div class="row"><span class="k">Cloud · Humidity</span><span class="v mono">${num(c.cloud_cover,0)}% · ${num(c.relative_humidity_2m,0)}%</span></div>
         <div class="row"><span class="k">Rain now</span><span class="v mono">${num(c.precipitation,1)} mm</span></div>
+        <div class="row"><span class="k">UV index</span><span class="v mono">${num(c.uv_index,1)}<em>${uvWord(c.uv_index)}</em></span></div>
         <div class="row"><span class="k">Sun</span><span class="v mono">${esc(sunTxt)}</span></div>
       </div>
       ${hires ? `<div class="srcnote">Wind from the Met Office UKV model on its 2 km grid — fine enough to see round headlands. The rest is the blended forecast.</div>` : ""}
@@ -1690,7 +1982,7 @@ function daysSection(w, m, tide, off){
       <span class="tmp mono">${num(dl.temperature_2m_max[i],0,"°")} <span>${num(dl.temperature_2m_min[i],0,"°")}</span></span>
       <span class="mini mono">${arrowSvg(dl.wind_direction_10m_dominant[i]||0)}${num(dl.wind_speed_10m_max[i],0)}–${num(dl.wind_gusts_10m_max[i],0)} kn</span>
       <span class="mini sea">${wave != null ? "sea " + num(wave,1) + " m" : ""}</span>
-      <span class="mini mono">${num(dl.precipitation_probability_max ? dl.precipitation_probability_max[i] : null,0)}% rain</span>
+      <span class="mini mono">${num(dl.precipitation_probability_max ? dl.precipitation_probability_max[i] : null,0)}% rain · UV ${num(dl.uv_index_max ? dl.uv_index_max[i] : null,0)}</span>
     </div>`;
   }
   return `<section id="sec-week" data-nav="Week"><div class="shead"><span class="eyebrow">Week ahead</span></div>
@@ -1728,9 +2020,11 @@ function footerHtml(m, tide){
   return `<footer>
     Weather from national meteorological services via Open-Meteo, with wind over the British Isles from the Met Office UKV model on its 2 km grid.
     Waves, sea temperature, currents and sea level from Copernicus Marine (MeteoFrance SMOC and MFWAM) via Open-Meteo — the tidal stream arrows carry the tide but not local eddies.
-    Synoptic charts by the NOAA Ocean Prediction Center.
+    Synoptic charts by the NOAA Ocean Prediction Center. Rain radar by RainViewer.
     Storm overflow status straight from the water companies' event-duration monitors via the Stream open data platform (the National Storm Overflow Hub, England only; refreshed every ten minutes,
-    and a monitor saying nothing is not the same as nothing happening). Map tiles © OpenStreetMap contributors.<br>
+    and a monitor saying nothing is not the same as nothing happening).
+    Bathing water classifications from the Environment Agency (England, Open Government Licence); lifeguarded beaches from RNLI open data — patrols are seasonal, so check flags on the day.
+    Map tiles © OpenStreetMap contributors.<br>
     Sea level is modelled on an 8 km grid and referenced to mean sea level, not chart datum. In a place as awkward as the Solent it will read a few minutes and a few tenths out.
     <b style="color:var(--ink-2)">Not for navigation — keep the almanac.</b>
   </footer>`;
